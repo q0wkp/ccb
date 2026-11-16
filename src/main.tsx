@@ -667,7 +667,7 @@ function eagerLoadSettings(): void {
   profileCheckpoint('eagerLoadSettings_end');
 }
 
-function initializeEntrypoint(isNonInteractive: boolean): void {
+function initializeEntrypoint(): void {
   // Skip if already set (e.g., by SDK or other entrypoints)
   if (process.env.CLAUDE_CODE_ENTRYPOINT) {
     return;
@@ -690,8 +690,8 @@ function initializeEntrypoint(isNonInteractive: boolean): void {
   // Note: 'local-agent' entrypoint is set by the local agent mode launcher
   // via CLAUDE_CODE_ENTRYPOINT env var (handled by early return above)
 
-  // Set based on interactive status
-  process.env.CLAUDE_CODE_ENTRYPOINT = isNonInteractive ? 'sdk-cli' : 'cli';
+  // Use the print-mode entrypoint for both interactive and non-interactive CLI sessions.
+  process.env.CLAUDE_CODE_ENTRYPOINT = 'sdk-cli';
 }
 
 // Set by early argv processing when `claude open <url>` is detected (interactive mode only)
@@ -973,8 +973,8 @@ export async function main() {
   const isInteractive = !isNonInteractive;
   setIsInteractive(isInteractive);
 
-  // Initialize entrypoint based on mode - needs to be set before any event is logged
-  initializeEntrypoint(isNonInteractive);
+  // Initialize entrypoint before any event is logged
+  initializeEntrypoint();
 
   // Determine client type
   const clientType = (() => {
@@ -993,7 +993,7 @@ export async function main() {
       return 'remote';
     }
 
-    return 'cli';
+    return process.env.CLAUDE_CODE_ENTRYPOINT === 'cli' ? 'cli' : 'sdk-cli';
   })();
   setClientType(clientType);
 

@@ -83,14 +83,6 @@ describe('beta header constants safety', () => {
     const CACHE_EDITING_VALUE = '' // 对应 constants/betas.ts:50
     expect(CACHE_EDITING_VALUE).toBe('')
     expect(Boolean(CACHE_EDITING_VALUE)).toBe(false)
-
-    // CLI_INTERNAL_BETA_HEADER — USER_TYPE !== 'ant' 时为空
-    // 在测试环境中 USER_TYPE 通常不是 'ant'
-    const CLI_INTERNAL_VALUE =
-      process.env.USER_TYPE === 'ant' ? 'cli-internal-2026-02-09' : ''
-    if (process.env.USER_TYPE !== 'ant') {
-      expect(CLI_INTERNAL_VALUE).toBe('')
-    }
   })
 
   test('truthy check correctly gates empty beta headers', () => {
