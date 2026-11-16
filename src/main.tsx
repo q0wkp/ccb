@@ -993,7 +993,7 @@ export async function main() {
       return 'remote';
     }
 
-    return 'cli';
+    return process.env.CLAUDE_CODE_ENTRYPOINT === 'cli' ? 'cli' : 'sdk-cli';
   })();
   setClientType(clientType);
 

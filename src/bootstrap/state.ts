@@ -297,7 +297,7 @@ function getInitialState(): State {
     strictToolResultPairing: false,
     sdkAgentProgressSummariesEnabled: false,
     userMsgOptIn: false,
-    clientType: 'cli',
+    clientType: 'sdk-cli',
     sessionSource: undefined,
     questionPreviewFormat: undefined,
     sessionIngressToken: undefined,
