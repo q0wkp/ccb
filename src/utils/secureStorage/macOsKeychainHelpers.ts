@@ -11,12 +11,18 @@
  *
  * The imports below (envUtils, oauth constants, crypto, os) are already
  * evaluated by startupProfiler.ts at main.tsx:5, so they add no module-init
- * cost when keychainPrefetch.ts pulls this file in.
+ * cost when keychainPrefetch.ts pulls this file in. ccbConfigProfile.ts only
+ * imports fs/os/path plus the pure ccbCredentialDenylist.ts (type-only
+ * imports) and is already loaded by envUtils.
  */
 
 import { createHash } from 'crypto'
 import { userInfo } from 'os'
 import { getOauthConfig } from 'src/constants/oauth.js'
+import {
+  getCcbCredentialStorageDir,
+  isCcbProfileRoutingEnabled,
+} from '../ccbConfigProfile.js'
 import { getClaudeConfigHomeDir } from '../envUtils.js'
 import type { SecureStorageData } from './types.js'
 
@@ -29,15 +35,30 @@ export const CREDENTIALS_SERVICE_SUFFIX = '-credentials'
 export function getMacOsKeychainStorageServiceName(
   serviceSuffix: string = '',
 ): string {
-  const configDir = getClaudeConfigHomeDir()
-  const isDefaultDir = !process.env.CLAUDE_CONFIG_DIR
+  const baseName = `Claude Code${getOauthConfig().OAUTH_FILE_SUFFIX}${serviceSuffix}`
 
-  // Use a hash of the config dir path to create a unique but stable suffix
-  // Only add suffix for non-default directories to maintain backwards compatibility
-  const dirHash = isDefaultDir
-    ? ''
-    : `-${createHash('sha256').update(configDir).digest('hex').substring(0, 8)}`
-  return `Claude Code${getOauthConfig().OAUTH_FILE_SUFFIX}${serviceSuffix}${dirHash}`
+  // CCB profiles (no explicit CLAUDE_CONFIG_DIR) never use the official
+  // keychain entry: each profile gets its own stable service name derived
+  // from its credential dir, so compatible and isolated also differ from
+  // each other. See "Credential isolation" in ccbConfigProfile.ts.
+  if (isCcbProfileRoutingEnabled()) {
+    const profileHash = createHash('sha256')
+      .update(getCcbCredentialStorageDir())
+      .digest('hex')
+      .substring(0, 8)
+    return `${baseName}-ccb-${profileHash}`
+  }
+
+  // Explicit CLAUDE_CONFIG_DIR: upstream behavior, unchanged. A hash of the
+  // config dir path gives a unique but stable suffix. (The upstream
+  // "default dir => no suffix" case is the CCB-routed branch above, which
+  // deliberately never uses the official name.)
+  const configDir = getClaudeConfigHomeDir()
+  const dirHash = createHash('sha256')
+    .update(configDir)
+    .digest('hex')
+    .substring(0, 8)
+  return `${baseName}-${dirHash}`
 }
 
 export function getUsername(): string {

@@ -79,6 +79,8 @@ import {
 } from '../../utils/fastMode.js';
 import { isFullscreenEnvEnabled } from '../../utils/fullscreen.js';
 import { getPlatform } from '../../utils/platform.js';
+import { isCcbProfileRoutingEnabled, readPersistedCcbConfigMode } from '../../utils/ccbConfigProfile.js';
+import { CcbConfigProfilePicker } from './CcbConfigProfilePicker.js';
 
 type Props = {
   onClose: (result?: string, options?: { display?: CommandResultDisplay }) => void;
@@ -127,6 +129,7 @@ type SubMenu =
   | 'OutputStyle'
   | 'ChannelDowngrade'
   | 'Language'
+  | 'CcbConfigProfile'
   | 'EnableAutoUpdates';
 export function Config({
   onClose,
@@ -299,6 +302,17 @@ export function Config({
   // TODO: Add MCP servers
   const settingsItems: Setting[] = [
     // Global settings
+    ...(isCcbProfileRoutingEnabled()
+      ? [
+          {
+            id: 'ccbConfigProfile',
+            label: 'CCB configuration profile',
+            value: readPersistedCcbConfigMode() === 'compatible' ? 'Compatible' : 'Isolated',
+            type: 'managedEnum' as const,
+            onChange() {},
+          },
+        ]
+      : []),
     {
       id: 'autoCompactEnabled',
       label: 'Auto-compact',
@@ -1457,7 +1471,8 @@ export function Config({
       setting.id === 'teammateDefaultModel' ||
       setting.id === 'showExternalIncludesDialog' ||
       setting.id === 'outputStyle' ||
-      setting.id === 'language'
+      setting.id === 'language' ||
+      setting.id === 'ccbConfigProfile'
     ) {
       // managedEnum items open a submenu — isDirty is set by the submenu's
       // completion callback, not here (submenu may be cancelled).
@@ -1484,6 +1499,10 @@ export function Config({
           return;
         case 'language':
           setShowSubmenu('Language');
+          setTabsHidden(true);
+          return;
+        case 'ccbConfigProfile':
+          setShowSubmenu('CcbConfigProfile');
           setTabsHidden(true);
           return;
       }
@@ -1830,6 +1849,17 @@ export function Config({
             </Byline>
           </Text>
         </>
+      ) : showSubmenu === 'CcbConfigProfile' ? (
+        <CcbConfigProfilePicker
+          onComplete={label => {
+            setTabsHidden(false);
+            onClose(`CCB configuration profile changed to ${label}. Restart CCB to activate it.`);
+          }}
+          onCancel={() => {
+            setShowSubmenu(null);
+            setTabsHidden(false);
+          }}
+        />
       ) : showSubmenu === 'EnableAutoUpdates' ? (
         <Dialog
           title="Enable Auto-Updates"

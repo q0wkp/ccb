@@ -1,5 +1,6 @@
 import { isRemoteManagedSettingsEligible } from '../services/remoteManagedSettings/syncCache.js'
 import { clearCACertsCache } from './caCerts.js'
+import { isCcbProfileSelectionEnvVar } from './ccbConfigProfile.js'
 import { getGlobalConfig } from './config.js'
 import { isEnvTruthy } from './envUtils.js'
 import {
@@ -80,13 +81,33 @@ function withoutCcdSpawnEnvKeys(
 }
 
 /**
+ * Profile selection (CLAUDE_CONFIG_DIR, CCB_CONFIG_DIR, ...) may only come
+ * from the real process environment. A config-file `env` block — which in
+ * compatible mode includes the inherited official settings.json /
+ * ~/.claude.json — must never retarget the profile mid-process, e.g. back
+ * onto the official credential store. See ccbConfigProfile.ts.
+ */
+function withoutProfileSelectionVars(
+  env: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!env) return {}
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (!isCcbProfileSelectionEnvVar(key)) out[key] = value
+  }
+  return out
+}
+
+/**
  * Compose the strip filters applied to every settings-sourced env object.
  */
 function filterSettingsEnv(
   env: Record<string, string> | undefined,
 ): Record<string, string> {
   return withoutCcdSpawnEnvKeys(
-    withoutHostManagedProviderVars(withoutSSHTunnelVars(env)),
+    withoutHostManagedProviderVars(
+      withoutSSHTunnelVars(withoutProfileSelectionVars(env)),
+    ),
   )
 }
 

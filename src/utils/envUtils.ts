@@ -1,16 +1,32 @@
 import memoize from 'lodash-es/memoize.js'
-import { homedir } from 'os'
 import { join } from 'path'
+import {
+  getActiveCcbConfigMode,
+  getCcbProfileDir,
+  getExplicitClaudeConfigDir,
+  getOfficialClaudeConfigDir,
+} from './ccbConfigProfile.js'
 
 // Memoized: 150+ callers, many on hot paths. Keyed off CLAUDE_CONFIG_DIR so
 // tests that change the env var get a fresh value without explicit cache.clear.
+// An explicit (non-empty) CLAUDE_CONFIG_DIR wins; otherwise the CCB profile
+// decides: compatible shares the official ~/.claude data tree, isolated uses
+// ~/.ccb/isolated. The explicit dir is frozen per process outside tests (see
+// ccbConfigProfile.ts) so config-file `env` can never retarget it.
 export const getClaudeConfigHomeDir = memoize(
   (): string => {
     return (
-      process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
+      getExplicitClaudeConfigDir() ??
+      (getActiveCcbConfigMode() === 'compatible'
+        ? getOfficialClaudeConfigDir()
+        : getCcbProfileDir('isolated'))
     ).normalize('NFC')
   },
-  () => process.env.CLAUDE_CONFIG_DIR,
+  () =>
+    getExplicitClaudeConfigDir() ??
+    (getActiveCcbConfigMode() === 'compatible'
+      ? getOfficialClaudeConfigDir()
+      : getCcbProfileDir('isolated')),
 )
 
 export function getTeamsDir(): string {

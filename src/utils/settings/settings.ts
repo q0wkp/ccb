@@ -1,6 +1,7 @@
 import { feature } from 'bun:bundle'
 import mergeWith from 'lodash-es/mergeWith.js'
-import { dirname, join, resolve } from 'path'
+import { dirname, join, relative, resolve, sep } from 'path'
+import { realpathSync } from 'fs'
 import { z } from 'zod/v4'
 import {
   getFlagSettingsInline,
@@ -10,6 +11,13 @@ import {
 } from '../../bootstrap/state.js'
 import { getRemoteManagedSettingsSyncFromCache } from '../../services/remoteManagedSettings/syncCacheState.js'
 import { uniq } from '../array.js'
+import {
+  getOfficialClaudeConfigDir,
+  getCcbWritableConfigDir,
+  getExplicitClaudeConfigDir,
+  isCompatibleCcbConfigMode,
+} from '../ccbConfigProfile.js'
+import { stripCcbCredentialSettings } from '../ccbCredentialDenylist.js'
 import { logForDebugging } from '../debug.js'
 import { logForDiagnosticsNoPII } from '../diagLogs.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from '../envUtils.js'
@@ -239,7 +247,7 @@ function parseSettingsFileUncached(path: string): {
 export function getSettingsRootPathForSource(source: SettingSource): string {
   switch (source) {
     case 'userSettings':
-      return resolve(getClaudeConfigHomeDir())
+      return resolve(getCcbWritableConfigDir())
     case 'policySettings':
     case 'projectSettings':
     case 'localSettings': {
@@ -269,6 +277,10 @@ function getUserSettingsFilePath(): string {
     return 'cowork_settings.json'
   }
   return 'settings.json'
+}
+
+export function getOfficialUserSettingsFilePath(): string {
+  return join(getOfficialClaudeConfigDir(), getUserSettingsFilePath())
 }
 
 export function getSettingsFilePathForSource(
@@ -345,9 +357,29 @@ function getSettingsForSourceUncached(
   }
 
   const settingsFilePath = getSettingsFilePathForSource(source)
-  const { settings: fileSettings } = settingsFilePath
+  const { settings: parsedFileSettings } = settingsFilePath
     ? parseSettingsFile(settingsFilePath)
     : { settings: null }
+  const fileSettings =
+    settingsFilePath && isOfficialProfilePath(settingsFilePath)
+      ? (stripCcbCredentialSettings(parsedFileSettings || {}) as SettingsJson)
+      : parsedFileSettings
+
+  if (source === 'userSettings' && isCompatibleCcbConfigMode()) {
+    const { settings: officialSettings } = parseSettingsFile(
+      getOfficialUserSettingsFilePath(),
+    )
+    // Only the OFFICIAL layer is filtered: credential-producing keys
+    // (apiKeyHelper, awsAuthRefresh, ...) and secret env entries are never
+    // inherited, while values in CCB's own overlay file apply as written.
+    return mergeWith(
+      {},
+      stripCcbCredentialSettings(officialSettings || {}),
+      fileSettings || {},
+      (_objValue: unknown, srcValue: unknown) =>
+        Array.isArray(srcValue) ? srcValue : undefined,
+    ) as SettingsJson
+  }
 
   // For flagSettings, merge in any inline settings set via the SDK
   if (source === 'flagSettings') {
@@ -365,6 +397,24 @@ function getSettingsForSourceUncached(
   }
 
   return fileSettings
+}
+
+/** Settings can become a project/local source when cwd is $HOME. If that
+ * resolves inside the official profile, treat it as inherited official data
+ * and apply the same credential filter used for the user settings layer. */
+function isOfficialProfilePath(path: string): boolean {
+  if (getExplicitClaudeConfigDir() !== undefined) return false
+  try {
+    const officialRoot = realpathSync(getOfficialClaudeConfigDir())
+    const actualPath = realpathSync(path)
+    const relativePath = relative(officialRoot, actualPath)
+    return (
+      relativePath === '' ||
+      (!relativePath.startsWith(`..${sep}`) && relativePath !== '..')
+    )
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -437,7 +487,10 @@ export function updateSettingsForSource(
     // cache — mergeWith below mutates its target (including nested refs),
     // and mutating the cached object would leak unpersisted state if the
     // write fails before resetSettingsCache().
-    let existingSettings = getSettingsForSourceUncached(source)
+    let existingSettings =
+      source === 'userSettings' && isCompatibleCcbConfigMode()
+        ? parseSettingsFile(filePath).settings
+        : getSettingsForSourceUncached(source)
 
     // If validation failed, check if file exists with a JSON syntax error
     if (!existingSettings) {
@@ -738,6 +791,33 @@ function loadSettingsFromDisk(): SettingsWithErrors {
         continue
       }
 
+      if (source === 'userSettings' && isCompatibleCcbConfigMode()) {
+        const userPaths = [
+          getOfficialUserSettingsFilePath(),
+          getSettingsFilePathForSource('userSettings'),
+        ].filter((path): path is string => path !== undefined)
+        for (const userPath of userPaths) {
+          seenFiles.add(resolve(userPath))
+          const { errors } = parseSettingsFile(userPath)
+          for (const error of errors) {
+            const errorKey = `${error.file}:${error.path}:${error.message}`
+            if (!seenErrors.has(errorKey)) {
+              seenErrors.add(errorKey)
+              allErrors.push(error)
+            }
+          }
+        }
+        const settings = getSettingsForSourceUncached('userSettings')
+        if (settings) {
+          mergedSettings = mergeWith(
+            mergedSettings,
+            settings,
+            settingsMergeCustomizer,
+          )
+        }
+        continue
+      }
+
       const filePath = getSettingsFilePathForSource(source)
       if (filePath) {
         const resolvedPath = resolve(filePath)
@@ -746,7 +826,12 @@ function loadSettingsFromDisk(): SettingsWithErrors {
         if (!seenFiles.has(resolvedPath)) {
           seenFiles.add(resolvedPath)
 
-          const { settings, errors } = parseSettingsFile(filePath)
+          const { settings: parsedSettings, errors } =
+            parseSettingsFile(filePath)
+          const settings =
+            parsedSettings && isOfficialProfilePath(filePath)
+              ? stripCcbCredentialSettings(parsedSettings)
+              : parsedSettings
 
           // Add unique errors (deduplication)
           for (const error of errors) {
