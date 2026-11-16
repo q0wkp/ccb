@@ -2,9 +2,10 @@ import React from 'react';
 import { Box, Dialog, wrappedRender as render, Text } from '@anthropic/ink';
 import { KeybindingSetup } from '../keybindings/KeybindingProviderSetup.js';
 import { AppStateProvider } from '../state/AppState.js';
+import { isReadOnlyOfficialGlobalClaudeFile } from '../utils/env.js';
 import type { ConfigParseError } from '../utils/errors.js';
 import { getBaseRenderOptions } from '../utils/renderOptions.js';
-import { jsonStringify, writeFileSync_DEPRECATED } from '../utils/slowOperations.js';
+import { resetInvalidConfigFile } from '../utils/resetInvalidConfig.js';
 import type { ThemeName } from '../utils/theme.js';
 import { Select } from './CustomSelect/index.js';
 
@@ -15,6 +16,8 @@ interface InvalidConfigHandlerProps {
 interface InvalidConfigDialogProps {
   filePath: string;
   errorDescription: string;
+  /** Hide the reset option: the file must never be written (official global config in CCB compatible mode). */
+  readOnly?: boolean;
   onExit: () => void;
   onReset: () => void;
 }
@@ -25,6 +28,7 @@ interface InvalidConfigDialogProps {
 function InvalidConfigDialog({
   filePath,
   errorDescription,
+  readOnly = false,
   onExit,
   onReset,
 }: InvalidConfigDialogProps): React.ReactNode {
@@ -50,7 +54,7 @@ function InvalidConfigDialog({
         <Select
           options={[
             { label: 'Exit and fix manually', value: 'exit' },
-            { label: 'Reset with default configuration', value: 'reset' },
+            ...(readOnly ? [] : [{ label: 'Reset with default configuration', value: 'reset' }]),
           ]}
           onChange={handleSelect}
           onCancel={onExit}
@@ -77,6 +81,8 @@ export async function showInvalidConfigDialog({ error }: InvalidConfigHandlerPro
     theme: SAFE_ERROR_THEME_NAME,
   };
 
+  const readOnly = isReadOnlyOfficialGlobalClaudeFile(error.filePath);
+
   // biome-ignore lint/suspicious/noAsyncPromiseExecutor: render must be awaited inside executor
   await new Promise<void>(async resolve => {
     const { unmount } = await render(
@@ -85,16 +91,22 @@ export async function showInvalidConfigDialog({ error }: InvalidConfigHandlerPro
           <InvalidConfigDialog
             filePath={error.filePath}
             errorDescription={error.message}
+            readOnly={readOnly}
             onExit={() => {
               unmount();
               void resolve();
               process.exit(1);
             }}
             onReset={() => {
-              writeFileSync_DEPRECATED(error.filePath, jsonStringify(error.defaultConfig, null, 2), {
-                flush: false,
-                encoding: 'utf8',
-              });
+              // Refused (and the process exits non-zero) for the read-only
+              // official global config; the reset option is also hidden then.
+              const didReset = resetInvalidConfigFile(error.filePath, error.defaultConfig);
+              if (!didReset) {
+                unmount();
+                void resolve();
+                process.exit(1);
+                return;
+              }
               unmount();
               void resolve();
               process.exit(0);

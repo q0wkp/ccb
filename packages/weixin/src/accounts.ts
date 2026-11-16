@@ -19,10 +19,30 @@ export interface AccountData {
   savedAt: string
 }
 
-export function getStateDir(): string {
-  const dir =
+/**
+ * Where Weixin state (account.json with the bot token, cursor, access lists)
+ * lives, without touching the filesystem:
+ * 1. WEIXIN_STATE_DIR when set;
+ * 2. `<active CCB profile dir>/channels/weixin` — CCB_ACTIVE_CONFIG_DIR is
+ *    published by the CLI entrypoint only while CCB profile routing is
+ *    active: ~/.claude in compatible mode (where existing logins already
+ *    live), ~/.ccb/isolated in isolated mode;
+ * 3. otherwise `~/.claude/channels/weixin`, exactly as before CCB profiles —
+ *    including when an explicit CLAUDE_CONFIG_DIR is set, which never
+ *    influenced this location.
+ */
+export function resolveStateDirPath(): string {
+  const activeProfileDir = process.env.CCB_ACTIVE_CONFIG_DIR
+  return (
     process.env.WEIXIN_STATE_DIR ||
-    join(homedir(), '.claude', 'channels', 'weixin')
+    (activeProfileDir
+      ? join(activeProfileDir, 'channels', 'weixin')
+      : join(homedir(), '.claude', 'channels', 'weixin'))
+  )
+}
+
+export function getStateDir(): string {
+  const dir = resolveStateDirPath()
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
   }

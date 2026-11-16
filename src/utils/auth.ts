@@ -44,6 +44,7 @@ import {
 } from './aws.js'
 import { AwsAuthStatusManager } from './awsAuthStatusManager.js'
 import { clearBetasCaches } from './betas.js'
+import { getCcbCredentialStorageDir } from './ccbConfigProfile.js'
 import {
   type AccountInfo,
   checkHasTrustDialogAccepted,
@@ -51,12 +52,7 @@ import {
   saveGlobalConfig,
 } from './config.js'
 import { logAntError, logForDebugging } from './debug.js'
-import {
-  getClaudeConfigHomeDir,
-  isBareMode,
-  isEnvTruthy,
-  isRunningOnHomespace,
-} from './envUtils.js'
+import { isBareMode, isEnvTruthy, isRunningOnHomespace } from './envUtils.js'
 import { errorMessage } from './errors.js'
 import { execSyncWithDefaults_DEPRECATED } from './execFileNoThrow.js'
 import * as lockfile from './lockfile.js'
@@ -1315,7 +1311,7 @@ let lastCredentialsMtimeMs = 0
 async function invalidateOAuthCacheIfDiskChanged(): Promise<void> {
   try {
     const { mtimeMs } = await stat(
-      join(getClaudeConfigHomeDir(), '.credentials.json'),
+      join(getCcbCredentialStorageDir(), '.credentials.json'),
     )
     if (mtimeMs !== lastCredentialsMtimeMs) {
       lastCredentialsMtimeMs = mtimeMs
@@ -1476,8 +1472,10 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
     return false
   }
 
-  // Tokens are still expired, try to acquire lock and refresh
-  const claudeDir = getClaudeConfigHomeDir()
+  // Tokens are still expired, try to acquire lock and refresh. The lock lives
+  // in the CCB credential dir (not the shared official ~/.claude in
+  // compatible mode) because CCB refreshes only its own tokens.
+  const claudeDir = getCcbCredentialStorageDir()
   await mkdir(claudeDir, { recursive: true })
 
   let release

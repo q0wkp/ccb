@@ -20,10 +20,11 @@ import {
   closeSync,
   writeFileSync,
 } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { validateKey } from '../../utils/localValidate.js'
+import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -32,8 +33,7 @@ import { validateKey } from '../../utils/localValidate.js'
 // changes CLAUDE_CONFIG_DIR mid-process still picks up the new dir.
 let _baseDirCache: { configDir: string; baseDir: string } | undefined
 function getBaseDir(): string {
-  const configDir =
-    process.env['CLAUDE_CONFIG_DIR'] ?? join(homedir(), '.claude')
+  const configDir = getClaudeConfigHomeDir()
   if (_baseDirCache && _baseDirCache.configDir === configDir) {
     return _baseDirCache.baseDir
   }

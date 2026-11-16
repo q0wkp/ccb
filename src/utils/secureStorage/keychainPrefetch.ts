@@ -6,6 +6,8 @@
  * SEQUENTIALLY via sync execSync during applySafeConfigEnvironmentVariables():
  *   1. "Claude Code-credentials" (OAuth tokens)  — ~32ms
  *   2. "Claude Code" (legacy API key)            — ~33ms
+ * (Under CCB profile routing both names carry a `-ccb-<hash>` suffix — see
+ * getMacOsKeychainStorageServiceName(); official entries are never read.)
  * Sequential cost: ~65ms on every macOS startup.
  *
  * Firing both here lets the subprocesses run in parallel with the ~65ms of

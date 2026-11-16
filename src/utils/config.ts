@@ -14,9 +14,21 @@ import type {
 } from '../services/oauth/types.js'
 import { getCwd } from '../utils/cwd.js'
 import { registerCleanup } from './cleanupRegistry.js'
+import {
+  getCcbWritableConfigDir,
+  isCompatibleCcbConfigMode,
+} from './ccbConfigProfile.js'
+import {
+  CCB_CREDENTIAL_GLOBAL_CONFIG_KEYS,
+  stripCcbCredentialGlobalConfig,
+} from './ccbCredentialDenylist.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
-import { getGlobalClaudeFile } from './env.js'
+import {
+  getGlobalClaudeFile,
+  getOfficialGlobalClaudeFile,
+  isReadOnlyOfficialGlobalClaudeFile,
+} from './env.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
 import { ConfigParseError, getErrnoCode } from './errors.js'
 import { writeFileSyncAndFlush_DEPRECATED } from './file.js'
@@ -632,6 +644,197 @@ function createDefaultGlobalConfig(): GlobalConfig {
 
 export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = createDefaultGlobalConfig()
 
+/**
+ * The official global config as seen by CCB compatible mode. Login identity,
+ * API-key secrets, and API-key approvals (CCB_CREDENTIAL_GLOBAL_CONFIG_KEYS)
+ * are replaced by their defaults (normally absent), and secret `env` entries
+ * (API keys, auth tokens, cloud credentials) are dropped — see
+ * ccbCredentialDenylist.ts: CCB never shares credentials with official Claude
+ * Code. Because the same view is the diff base in
+ * createCompatibleGlobalOverlay(), CCB's own values for those keys always
+ * persist to the overlay.
+ */
+function readOfficialGlobalConfig(throwOnInvalid = false): GlobalConfig {
+  const official = stripCcbCredentialGlobalConfig(
+    migrateConfigFields(
+      getConfig(
+        getOfficialGlobalClaudeFile(),
+        createDefaultGlobalConfig,
+        throwOnInvalid,
+      ),
+    ),
+  )
+  const defaults = createDefaultGlobalConfig()
+  for (const key of CCB_CREDENTIAL_GLOBAL_CONFIG_KEYS) {
+    if (defaults[key] !== undefined) {
+      Object.assign(official, { [key]: defaults[key] })
+    }
+  }
+  return official
+}
+
+const COMPATIBLE_OVERLAY_MARKER = '__ccbCompatibleOverlayV1'
+type CompatibleOverlayEnvelope = {
+  [COMPATIBLE_OVERLAY_MARKER]: true
+  overrides: Record<string, unknown>
+  maskedPaths: string[]
+}
+
+function mergeOverlayValue(
+  base: unknown,
+  override: unknown,
+  maskedPaths: ReadonlySet<string>,
+  path: string,
+): unknown {
+  if (
+    base !== null &&
+    typeof base === 'object' &&
+    !Array.isArray(base) &&
+    override !== null &&
+    typeof override === 'object' &&
+    !Array.isArray(override)
+  ) {
+    const result: Record<string, unknown> = {
+      ...(base as Record<string, unknown>),
+    }
+    const overrides = override as Record<string, unknown>
+    for (const key of Object.keys(result)) {
+      const childPath = `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`
+      if (maskedPaths.has(childPath)) delete result[key]
+    }
+    for (const [key, value] of Object.entries(overrides)) {
+      const childPath = `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`
+      result[key] = mergeOverlayValue(
+        result[key],
+        value,
+        maskedPaths,
+        childPath,
+      )
+    }
+    return result
+  }
+  return override
+}
+
+function mergeCompatibleGlobalConfig(overlay: GlobalConfig): GlobalConfig {
+  if (!isCompatibleCcbConfigMode()) return overlay
+  const record = overlay as unknown as Record<string, unknown>
+  const isEnvelope = record[COMPATIBLE_OVERLAY_MARKER] === true
+  const overrides = isEnvelope
+    ? ((record.overrides as Record<string, unknown> | undefined) ?? {})
+    : record
+  const maskedPaths = new Set(
+    isEnvelope && Array.isArray(record.maskedPaths)
+      ? record.maskedPaths.filter(
+          (path): path is string => typeof path === 'string',
+        )
+      : [],
+  )
+  const merged = readOfficialGlobalConfig() as unknown as Record<
+    string,
+    unknown
+  >
+  for (const [key, value] of Object.entries(overrides)) {
+    merged[key] = mergeOverlayValue(
+      merged[key],
+      value,
+      maskedPaths,
+      `/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`,
+    )
+  }
+  for (const path of maskedPaths) {
+    const [topKey, ...rest] = path
+      .slice(1)
+      .split('/')
+      .map(part => part.replaceAll('~1', '/').replaceAll('~0', '~'))
+    if (!topKey || rest.length !== 0 || topKey in overrides) continue
+    delete merged[topKey]
+  }
+  return migrateConfigFields({
+    ...merged,
+  } as unknown as GlobalConfig)
+}
+
+/**
+ * Store only top-level values that differ from the official config. This
+ * keeps the official file read-only while allowing CCB-specific state to
+ * persist in ~/.ccb/compatible/.claude.json.
+ */
+function createCompatibleGlobalOverlay(config: GlobalConfig): GlobalConfig {
+  const official = readOfficialGlobalConfig() as unknown as Record<
+    string,
+    unknown
+  >
+  const current = config as unknown as Record<string, unknown>
+  const overrides: Record<string, unknown> = {}
+  const maskedPaths: string[] = []
+  const diff = (
+    value: unknown,
+    base: unknown,
+    path: string,
+  ): unknown | undefined => {
+    if (value === undefined) {
+      if (base !== undefined) maskedPaths.push(path)
+      return undefined
+    }
+    if (
+      value !== null &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      base !== null &&
+      typeof base === 'object' &&
+      !Array.isArray(base)
+    ) {
+      const result: Record<string, unknown> = {}
+      const masksBefore = maskedPaths.length
+      const valueRecord = value as Record<string, unknown>
+      const baseRecord = base as Record<string, unknown>
+      for (const key of new Set([
+        ...Object.keys(valueRecord),
+        ...Object.keys(baseRecord),
+      ])) {
+        const childPath = `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`
+        const child = diff(valueRecord[key], baseRecord[key], childPath)
+        if (child !== undefined) result[key] = child
+      }
+      return Object.keys(result).length > 0 || maskedPaths.length > masksBefore
+        ? result
+        : undefined
+    }
+    return jsonStringify(value) === jsonStringify(base) ? undefined : value
+  }
+  for (const key of new Set([
+    ...Object.keys(current),
+    ...Object.keys(official),
+  ])) {
+    const value = diff(
+      current[key],
+      official[key],
+      `/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`,
+    )
+    if (value !== undefined) overrides[key] = value
+  }
+  return {
+    [COMPATIBLE_OVERLAY_MARKER]: true,
+    overrides,
+    maskedPaths,
+  } as unknown as GlobalConfig
+}
+
+function readStoredGlobalConfig(throwOnInvalid = false): GlobalConfig {
+  return getConfig(
+    getGlobalClaudeFile(),
+    isCompatibleCcbConfigMode()
+      ? () => ({}) as GlobalConfig
+      : createDefaultGlobalConfig,
+    throwOnInvalid,
+  )
+}
+
+function readEffectiveGlobalConfig(throwOnInvalid = false): GlobalConfig {
+  return mergeCompatibleGlobalConfig(readStoredGlobalConfig(throwOnInvalid))
+}
+
 export const GLOBAL_CONFIG_KEYS = [
   'apiKeyHelper',
   'installMethod',
@@ -817,9 +1020,10 @@ export function saveGlobalConfig(
 
   let written: GlobalConfig | null = null
   try {
+    const compatibleMode = isCompatibleCcbConfigMode()
     const didWrite = saveConfigWithLock(
       getGlobalClaudeFile(),
-      createDefaultGlobalConfig,
+      compatibleMode ? () => ({}) as GlobalConfig : createDefaultGlobalConfig,
       current => {
         const config = updater(current)
         // Skip if no changes (same reference returned)
@@ -828,10 +1032,16 @@ export function saveGlobalConfig(
         }
         written = {
           ...config,
-          projects: removeProjectHistory(current.projects),
+          projects: removeProjectHistory(config.projects),
         }
         return written
       },
+      compatibleMode
+        ? {
+            hydrate: mergeCompatibleGlobalConfig,
+            dehydrate: createCompatibleGlobalOverlay,
+          }
+        : undefined,
     )
     // Only write-through if we actually wrote. If the auth-loss guard
     // tripped (or the updater made no changes), the file is untouched and
@@ -847,10 +1057,7 @@ export function saveGlobalConfig(
     // window: if another process is mid-write (or the file got truncated),
     // getConfig returns defaults. Refuse to write those over a good cached
     // config to avoid wiping auth. See GH #3117.
-    const currentConfig = getConfig(
-      getGlobalClaudeFile(),
-      createDefaultGlobalConfig,
-    )
+    const currentConfig = readEffectiveGlobalConfig()
     if (wouldLoseAuthState(currentConfig)) {
       logForDebugging(
         'saveGlobalConfig fallback: re-read config is missing auth that cache has; refusing to write. See GH #3117.',
@@ -866,9 +1073,17 @@ export function saveGlobalConfig(
     }
     written = {
       ...config,
-      projects: removeProjectHistory(currentConfig.projects),
+      projects: removeProjectHistory(config.projects),
     }
-    saveConfig(getGlobalClaudeFile(), written, DEFAULT_GLOBAL_CONFIG)
+    saveConfig(
+      getGlobalClaudeFile(),
+      isCompatibleCcbConfigMode()
+        ? createCompatibleGlobalOverlay(written)
+        : written,
+      isCompatibleCcbConfigMode()
+        ? ({} as GlobalConfig)
+        : DEFAULT_GLOBAL_CONFIG,
+    )
     writeThroughGlobalConfigCache(written)
   }
 }
@@ -999,6 +1214,8 @@ function removeProjectHistory(
 // fs.watchFile poll interval for detecting writes from other instances (ms)
 const CONFIG_FRESHNESS_POLL_MS = 1000
 let freshnessWatcherStarted = false
+let officialFreshnessWatcherStarted = false
+let lastOfficialConfigMtime = 0
 
 // fs.watchFile polls stat on the libuv threadpool and only calls us when mtime
 // changed — a stalled stat never blocks the main thread.
@@ -1024,10 +1241,14 @@ function startGlobalConfigFreshnessWatcher(): void {
           const parsed = safeParseJSON(stripBOM(content))
           if (parsed === null || typeof parsed !== 'object') return
           globalConfigCache = {
-            config: migrateConfigFields({
-              ...createDefaultGlobalConfig(),
-              ...(parsed as Partial<GlobalConfig>),
-            }),
+            config: mergeCompatibleGlobalConfig(
+              migrateConfigFields({
+                ...(isCompatibleCcbConfigMode()
+                  ? {}
+                  : createDefaultGlobalConfig()),
+                ...(parsed as Partial<GlobalConfig>),
+              } as GlobalConfig),
+            ),
             mtime: curr.mtimeMs,
           }
           lastReadFileStats = { mtime: curr.mtimeMs, size: curr.size }
@@ -1035,8 +1256,44 @@ function startGlobalConfigFreshnessWatcher(): void {
         .catch(() => {})
     },
   )
+  if (isCompatibleCcbConfigMode()) {
+    const officialFile = getOfficialGlobalClaudeFile()
+    try {
+      lastOfficialConfigMtime =
+        getFsImplementation().statSync(officialFile).mtimeMs
+    } catch {
+      lastOfficialConfigMtime = 0
+    }
+    officialFreshnessWatcherStarted = true
+    watchFile(
+      officialFile,
+      { interval: CONFIG_FRESHNESS_POLL_MS, persistent: false },
+      curr => {
+        if (curr.mtimeMs !== 0 && curr.mtimeMs <= lastOfficialConfigMtime)
+          return
+        lastOfficialConfigMtime = curr.mtimeMs
+        // The official file is the read-only merge base in compatible mode.
+        // Re-read it together with the CCB overlay so external model and
+        // preference changes become visible during this process.
+        try {
+          globalConfigCache = {
+            config: readEffectiveGlobalConfig(),
+            mtime: Date.now(),
+          }
+          lastReadFileStats = null
+        } catch {
+          // Keep the last valid cache if an external edit is in progress.
+        }
+      },
+    )
+  }
   registerCleanup(async () => {
     unwatchFile(file)
+    if (officialFreshnessWatcherStarted) {
+      unwatchFile(getOfficialGlobalClaudeFile())
+      officialFreshnessWatcherStarted = false
+      lastOfficialConfigMtime = 0
+    }
     freshnessWatcherStarted = false
   })
 }
@@ -1073,9 +1330,7 @@ export function getGlobalConfig(): GlobalConfig {
     } catch {
       // File doesn't exist
     }
-    const config = migrateConfigFields(
-      getConfig(getGlobalClaudeFile(), createDefaultGlobalConfig),
-    )
+    const config = readEffectiveGlobalConfig()
     globalConfigCache = {
       config,
       mtime: stats?.mtimeMs ?? Date.now(),
@@ -1087,9 +1342,7 @@ export function getGlobalConfig(): GlobalConfig {
     return config
   } catch {
     // If anything goes wrong, fall back to uncached behavior
-    return migrateConfigFields(
-      getConfig(getGlobalClaudeFile(), createDefaultGlobalConfig),
-    )
+    return readEffectiveGlobalConfig()
   }
 }
 
@@ -1162,6 +1415,10 @@ function saveConfigWithLock<A extends object>(
   file: string,
   createDefault: () => A,
   mergeFn: (current: A) => A,
+  transforms?: {
+    hydrate(stored: A): A
+    dehydrate(effective: A): A
+  },
 ): boolean {
   const defaultConfig = createDefault()
   const dir = dirname(file)
@@ -1221,7 +1478,10 @@ function saveConfigWithLock<A extends object>(
     // Re-read the current config to get latest state. If the file is
     // momentarily corrupted (concurrent writes, kill-during-write), this
     // returns defaults -- we must not write those back over good config.
-    const currentConfig = getConfig(file, createDefault)
+    const storedConfig = getConfig(file, createDefault)
+    const currentConfig = transforms
+      ? transforms.hydrate(storedConfig)
+      : storedConfig
     if (file === getGlobalClaudeFile() && wouldLoseAuthState(currentConfig)) {
       logForDebugging(
         'saveConfigWithLock: re-read config is missing auth that cache has; refusing to write to avoid wiping ~/.claude.json. See GH #3117.',
@@ -1240,8 +1500,11 @@ function saveConfigWithLock<A extends object>(
     }
 
     // Filter out any values that match the defaults
+    const configToStore = transforms
+      ? transforms.dehydrate(mergedConfig)
+      : mergedConfig
     const filteredConfig = pickBy(
-      mergedConfig,
+      configToStore,
       (value, key) =>
         jsonStringify(value) !== jsonStringify(defaultConfig[key as keyof A]),
     )
@@ -1352,11 +1615,7 @@ export function enableConfigs(): void {
   // to prevent us from adding config reading during module initialization
   configReadingAllowed = true
   // We only check the global config because currently all the configs share a file
-  getConfig(
-    getGlobalClaudeFile(),
-    createDefaultGlobalConfig,
-    true /* throw on invalid */,
-  )
+  readEffectiveGlobalConfig(true /* throw on invalid */)
 
   logForDiagnosticsNoPII('info', 'enable_configs_completed', {
     duration_ms: Date.now() - startTime,
@@ -1368,7 +1627,18 @@ export function enableConfigs(): void {
  * Uses ~/.claude/backups/ to keep the home directory clean.
  */
 function getConfigBackupDir(): string {
-  return join(getClaudeConfigHomeDir(), 'backups')
+  // Compatible mode: keep CCB overlay backups out of the shared official
+  // ~/.claude/backups. Official backups of .claude.json share the same file
+  // name prefix and contain official credentials/identity, so CCB must
+  // neither mix its overlay backups in with them nor suggest restoring an
+  // official backup as the CCB overlay. (The official global config itself
+  // is never backed up or restored by CCB: see getConfig.)
+  return join(
+    isCompatibleCcbConfigMode()
+      ? getCcbWritableConfigDir()
+      : getClaudeConfigHomeDir(),
+    'backups',
+  )
 }
 
 /**
@@ -1426,6 +1696,9 @@ function findMostRecentBackup(file: string): string | null {
   return null
 }
 
+// Official config files already reported as invalid (see getConfig).
+const warnedInvalidOfficialConfigFiles = new Set<string>()
+
 function getConfig<A>(
   file: string,
   createDefault: () => A,
@@ -1459,6 +1732,9 @@ function getConfig<A>(
     // Handle file not found - check for backup and return default
     const errCode = getErrnoCode(error)
     if (errCode === 'ENOENT') {
+      // The official global config is read-only to CCB: a missing file just
+      // means "nothing to inherit", with no restore advice.
+      if (isReadOnlyOfficialGlobalClaudeFile(file)) return createDefault()
       const backupPath = findMostRecentBackup(file)
       if (backupPath) {
         process.stderr.write(
@@ -1473,6 +1749,29 @@ function getConfig<A>(
     // Re-throw ConfigParseError if throwOnInvalid is true
     if (error instanceof ConfigParseError && throwOnInvalid) {
       throw error
+    }
+
+    // The official global config is read-only to CCB: never back it up (the
+    // copy would hold official identity/credential fields inside a CCB
+    // directory), never suggest restoring over it, never reset it. CCB just
+    // ignores it and runs on its overlay / defaults. The file stays invalid
+    // until the official client or the user fixes it, so warn once per file.
+    if (
+      error instanceof ConfigParseError &&
+      isReadOnlyOfficialGlobalClaudeFile(file)
+    ) {
+      if (!warnedInvalidOfficialConfigFiles.has(file)) {
+        warnedInvalidOfficialConfigFiles.add(file)
+        logForDebugging(
+          `Official config file is invalid, ignoring: ${error.message}`,
+          { level: 'error' },
+        )
+        process.stderr.write(
+          `\nThe official Claude configuration file at ${file} is invalid (${error.message}). ` +
+            `CCB ignores it and never modifies or backs it up.\n\n`,
+        )
+      }
+      return createDefault()
     }
 
     // Log config parse errors so users know what happened
@@ -1643,66 +1942,22 @@ export function saveCurrentProjectConfig(
     return
   }
   const absolutePath = getProjectPathForConfig()
-
-  let written: GlobalConfig | null = null
-  try {
-    const didWrite = saveConfigWithLock(
-      getGlobalClaudeFile(),
-      createDefaultGlobalConfig,
-      current => {
-        const currentProjectConfig =
-          current.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
-        const newProjectConfig = updater(currentProjectConfig)
-        // Skip if no changes (same reference returned)
-        if (newProjectConfig === currentProjectConfig) {
-          return current
-        }
-        written = {
-          ...current,
-          projects: {
-            ...current.projects,
-            [absolutePath]: newProjectConfig,
-          },
-        }
-        return written
-      },
-    )
-    if (didWrite && written) {
-      writeThroughGlobalConfigCache(written)
-    }
-  } catch (error) {
-    logForDebugging(`Failed to save config with lock: ${error}`, {
-      level: 'error',
-    })
-
-    // Same race window as saveGlobalConfig's fallback -- refuse to write
-    // defaults over good cached config. See GH #3117.
-    const config = getConfig(getGlobalClaudeFile(), createDefaultGlobalConfig)
-    if (wouldLoseAuthState(config)) {
-      logForDebugging(
-        'saveCurrentProjectConfig fallback: re-read config is missing auth that cache has; refusing to write. See GH #3117.',
-        { level: 'error' },
-      )
-      logEvent('tengu_config_auth_loss_prevented', {})
-      return
-    }
+  saveGlobalConfig(config => {
     const currentProjectConfig =
       config.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
     const newProjectConfig = updater(currentProjectConfig)
     // Skip if no changes (same reference returned)
     if (newProjectConfig === currentProjectConfig) {
-      return
+      return config
     }
-    written = {
+    return {
       ...config,
       projects: {
         ...config.projects,
         [absolutePath]: newProjectConfig,
       },
     }
-    saveConfig(getGlobalClaudeFile(), written, DEFAULT_GLOBAL_CONFIG)
-    writeThroughGlobalConfigCache(written)
-  }
+  })
 }
 
 export function isAutoUpdaterDisabled(): boolean {
@@ -1820,6 +2075,7 @@ export function getUserClaudeRulesDir(): string {
 
 // Exported for testing only
 export const _getConfigForTesting = getConfig
+export const _readEffectiveGlobalConfigForTesting = readEffectiveGlobalConfig
 export const _wouldLoseAuthStateForTesting = wouldLoseAuthState
 export function _setGlobalConfigCacheForTesting(
   config: GlobalConfig | null,

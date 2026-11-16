@@ -4,7 +4,20 @@
 // Without this, JSC's C++ Vector grows without bound in long-running sessions.
 import '../utils/performanceShim.js';
 import { feature } from 'bun:bundle';
-import { isEnvTruthy } from '../utils/envUtils.js';
+import { isCcbProfileRoutingEnabled } from '../utils/ccbConfigProfile.js';
+import { getClaudeConfigHomeDir, isEnvTruthy } from '../utils/envUtils.js';
+
+// Make the active CCB profile data root available to workspace packages that
+// cannot import src/utils directly (for example the built-in Weixin channel).
+// Only published while CCB profile routing is active; with an explicit
+// CLAUDE_CONFIG_DIR the packages keep their pre-profile locations, and a value
+// inherited from a parent CCB process must not leak through.
+// eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
+if (isCcbProfileRoutingEnabled()) {
+  process.env.CCB_ACTIVE_CONFIG_DIR = getClaudeConfigHomeDir();
+} else {
+  delete process.env.CCB_ACTIVE_CONFIG_DIR;
+}
 
 // Runtime fallback for MACRO.* when not injected by build/dev defines.
 // This happens when running cli.tsx directly (not via `bun run dev` or built dist/).

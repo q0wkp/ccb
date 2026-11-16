@@ -1,6 +1,6 @@
 import { chmodSync } from 'fs'
 import { join } from 'path'
-import { getClaudeConfigHomeDir } from '../envUtils.js'
+import { getCcbCredentialStorageDir } from '../ccbConfigProfile.js'
 import { getErrnoCode } from '../errors.js'
 import { getFsImplementation } from '../fsOperations.js'
 import {
@@ -11,7 +11,10 @@ import {
 import type { SecureStorage, SecureStorageData } from './types.js'
 
 function getStoragePath(): { storageDir: string; storagePath: string } {
-  const storageDir = getClaudeConfigHomeDir()
+  // Not getClaudeConfigHomeDir(): in CCB compatible mode that is the shared
+  // official ~/.claude, whose .credentials.json belongs to official Claude
+  // Code. CCB credentials always live in the active CCB profile dir.
+  const storageDir = getCcbCredentialStorageDir()
   const storageFileName = '.credentials.json'
   return { storageDir, storagePath: join(storageDir, storageFileName) }
 }

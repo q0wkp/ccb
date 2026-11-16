@@ -5,7 +5,7 @@
 // streaming protocol internally; this adapter bridges it to the
 // send/finalize/close pattern used by useVoice.ts.
 
-import { homedir } from 'node:os'
+import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import type { ASRResponse } from 'doubaoime-asr'
 import type {
   FinalizeSource,
@@ -166,7 +166,7 @@ export async function connectDoubaoStream(
 
   // Start the ASR session in the background
   const config = new ASRConfig({
-    credentialPath: `${homedir()}/.claude/tts/doubao/credentials.json`,
+    credentialPath: `${getClaudeConfigHomeDir()}/tts/doubao/credentials.json`,
   })
 
   // Ensure credentials are initialized (may auto-generate)

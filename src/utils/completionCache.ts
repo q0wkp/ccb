@@ -5,6 +5,7 @@ import { dirname, join } from 'path'
 import { pathToFileURL } from 'url'
 import { color } from '@anthropic/ink'
 import { supportsHyperlinks } from '@anthropic/ink'
+import { getClaudeConfigHomeDir } from './envUtils.js'
 import { logForDebugging } from './debug.js'
 import { isENOENT } from './errors.js'
 import { execFileNoThrow } from './execFileNoThrow.js'
@@ -24,7 +25,7 @@ type ShellInfo = {
 function detectShell(): ShellInfo | null {
   const shell = process.env.SHELL || ''
   const home = homedir()
-  const claudeDir = join(home, '.claude')
+  const claudeDir = getClaudeConfigHomeDir()
 
   if (shell.endsWith('/zsh') || shell.endsWith('/zsh.exe')) {
     const cacheFile = join(claudeDir, 'completion.zsh')
